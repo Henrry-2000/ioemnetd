@@ -1,0 +1,6 @@
+service ioemnetd_service /system/bin/ioemnetd -c /system/etc/oemnetd/firewall.rules -d /system/etc/oemnetd/ip2region.xdb -l /data/system/ -r 0
+    class main
+    user root
+
+on late-init
+    start ioemnetd_service 

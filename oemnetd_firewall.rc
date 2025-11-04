@@ -1,0 +1,7 @@
+on late-init:
+    start oemnetd_firewall_service
+
+service oemnetd_firewall_service /system/bin/oemnetd_firewall /system/etc/oemnetd/firewall.rules
+    class main
+    user root
+    oneshot
