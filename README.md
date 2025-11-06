@@ -11,3 +11,4 @@ lunch 2
 cd system/netd/ioemnetd
 mma
 ```
+## 3、生成的文件会在./out/target/product/generic_arm64/system/bin/ioemnetd
