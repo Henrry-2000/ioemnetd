@@ -4,11 +4,12 @@
 ## 1、初始化环境
 ```
 source build/envsetup.sh 
-lunch 2
+lunch aosp_x86_64 trunk_staging eng
+export USE_CCACHE=1
 ```
 ## 2、编译当前模块
 ```
 cd system/netd/ioemnetd
-mma
+mma -j1
 ```
 ## 3、生成的文件会在./out/target/product/generic_arm64/system/bin/ioemnetd
