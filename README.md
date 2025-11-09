@@ -14,6 +14,10 @@ mma -j1
 ```
 ## 3、生成的文件会在./out/target/product/generic_arm64/system/bin/ioemnetd
 
+## 4、把oemListener.cpp以及oemListener.h文件放在 system/netd/server 下
+
+## 5、把IOemNetd.aidl放在system/netd/server/com/android/internal/net 下
+
 ## 关于OOM问题
 0. 问题确认
 ```
