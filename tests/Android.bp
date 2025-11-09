@@ -1,0 +1,13 @@
+// tests/Android.bp
+cc_binary {
+    name: "test_set_rules",
+    srcs: [
+        "test_set_rules.cpp",
+        "fw_stub.cpp",
+    ],
+    shared_libs: [
+        // 如果需要依赖你项目里的库，可以在这里加，如 "ioemnetd" 或其它
+    ],
+    cflags: ["-std=c++11"],
+    // include_dirs: [".."], // 可按需要加 include 路径
+}
