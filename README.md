@@ -279,6 +279,123 @@ reportDnsEvent(InetdEventListener::EVENT_GETADDRINFO, mNetContext, latencyUs, rv
                ip_addrs, total_ip_addr_count);
 freeaddrinfo(result);
 ```
+
+### 境外IP拦截方案设计与实现
+在`dns_client.c`中添加发送DNS Refuse UDP报文的函数：
+```
+
+// Helper: send DNS REFUSED (RCODE=5) back to UDP client using same socket fd.
+// reqbuf: original request bytes, reqlen: length, cli: client addr, cli_len: len.
+static void send_dns_refused(int sockfd, const unsigned char *reqbuf, size_t reqlen,
+                             const struct sockaddr *cli, socklen_t cli_len, int rcode)
+{
+    if (!reqbuf || reqlen < 12 || sockfd < 0 || !cli) return;
+
+    // Copy header and question section, but set QR bit, set RCODE,
+    // zero ANCOUNT/NS/ARCOUNT. Keep question as-is.
+    // We will return the same number of bytes as request (header + question).
+    // Note: this assumes reqbuf contains the entire DNS query (header + question).
+    // If the request uses extensions/EDNS larger than our buffer, adapt accordingly.
+
+    unsigned char resp[2048];
+    size_t resp_len = reqlen;
+    if (resp_len > sizeof(resp)) resp_len = sizeof(resp);
+    memcpy(resp, reqbuf, resp_len);
+
+    // flags are at offset 2 (network order)
+    uint16_t flags_net;
+    memcpy(&flags_net, resp + 2, sizeof(flags_net));
+    uint16_t flags = ntohs(flags_net);
+
+    // set QR (response) bit
+    flags |= 0x8000;
+    // clear low 4 bits (rcode) and set given rcode
+    flags = (flags & 0xFFF0) | (rcode & 0xF);
+
+    uint16_t newflags_net = htons(flags);
+    memcpy(resp + 2, &newflags_net, sizeof(newflags_net));
+
+    // zero ANCOUNT, NSCOUNT, ARCOUNT
+    uint16_t zero = htons(0);
+    memcpy(resp + 6, &zero, sizeof(zero)); // ANCOUNT
+    memcpy(resp + 8, &zero, sizeof(zero)); // NSCOUNT
+    memcpy(resp + 10, &zero, sizeof(zero)); // ARCOUNT
+
+    // sendto client
+    ssize_t w = sendto(sockfd, resp, resp_len, 0, cli, cli_len);
+    if (w < 0) {
+        ALOGE("send_dns_refused sendto failed: %s", strerror(errno));
+    } else {
+        ALOGI("send_dns_refused: sent %zd bytes rcode=%d to client", w, rcode);
+    }
+}
+```
+在`dns_client.c`中添加`is_china_ip`函数判断是否是境内IP：
+```
+// Returns: 1 if China/domestic, 0 if foreign, -1 on error
+int is_china_ip(const char* ip) {
+    if (!ip) return -1;
+    char is_china = 0;
+    // search_ip_string expects char* ip and char* is_china
+    int rc = search_ip_string((char*)ip, &is_china);
+    if (rc != 0) return -1; // lookup failed
+    return (is_china == 1) ? 1 : 0;
+}
+```
+在 dns_client.c的`main_loop`函数中中添加拒绝逻辑：
+```
+           /* --- BEGIN: DNS-layer immediate refusal for foreign IPs --- */
+            int foreign_found = 0;
+            for (int i = 0; i < match_count; i++) {
+                if (match_results[i] == NULL) continue;
+                int is_foreign = blocker_is_ip_foreign(match_results[i]);
+                if (is_foreign == 1) {
+                    foreign_found = 1;
+                    // if you want to log which IP triggered block:
+                    printf("Blocking domain %s due to foreign IP %s\n", domain, match_results[i]);
+                    break;
+                } else if (is_foreign == -1) {
+                    // lookup error: conservative policy -> treat as foreign
+                    foreign_found = 1;
+                    printf("IP lookup error for %s, treating as foreign (conservative)\n", match_results[i]);
+                    break;
+                }
+            }
+
+            if (foreign_found) {
+                // Send DNS REFUSED response to client and skip normal processing.
+                if (g_udp_sockfd >= 0 && node->addr_len > 0) {
+                    struct sockaddr_in addr;
+                    memcpy(&addr, &node->addr, sizeof(addr));
+                    send_dns_refused(g_udp_sockfd,
+                                     (const unsigned char*)node->data,
+                                     node->len,
+                                     (struct sockaddr *)&addr,
+                                     node->addr_len,
+                                     5); // REFUSED
+                    printf("Sent DNS REFUSED for domain %s to client\n", domain);
+                } else {
+                    printf("Cannot send DNS REFUSED: no udp sockfd or missing addr\n");
+                }
+
+                // Cleanup: free pid_name and match_results entries, then free node and continue
+                if (pid_name != NULL) {
+                    free(pid_name);
+                    pid_name = NULL;
+                }
+                for (int i = 0; i < match_count; i++) {
+                    if (match_results[i]) {
+                        free(match_results[i]);
+                        match_results[i] = NULL;
+                    }
+                }
+                // free the node memory (use your project's macro if exists)
+                free(node);
+                usleep(MAIN_FUNC_CYCLE);
+                continue; // go to next packet
+            }
+            /* --- END: DNS-layer immediate refusal for foreign IPs --- */
+```
 ## 初始化步骤
 0、将工程文件解压到aosp根路径下的system/netd/中
 1、初始化环境
