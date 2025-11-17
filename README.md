@@ -13,6 +13,7 @@ Netd主要功能是:第一、接收Framework的网络请求，处理请求，向
 2）execIptablesRestore为netd中执行防火墙的接口，其本质为调用iptables-restore命令。
 ```
 netd源码在安卓源码对应的system/netd下
+
 1、在oemnetd的aidl文件IOemNetd.aidl中添加接口set_iptables_rules，第一个参数为加载ipv4或者ipv6或两者都加载，第二个参数为防火墙的type，分为filter，mangle及nat三种，第三个参数为防火墙规则。
 
 ```
