@@ -51,8 +51,6 @@ static void send_dns_refused(int sockfd, const unsigned char *reqbuf, size_t req
 }
 /* PATCH END */
 
-替换原函数：
-
 /**
  * @file dns_client.c
  * @author fujy (fujy@vecentek.com)
