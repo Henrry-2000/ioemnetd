@@ -342,7 +342,7 @@ int is_china_ip(const char* ip) {
     return (is_china == 1) ? 1 : 0;
 }
 ```
-在 dns_client.c的`main_loop`函数中中添加拒绝逻辑：
+在 `dns_client.c`的`main_loop`函数中中添加拒绝逻辑：
 ```
            /* --- BEGIN: DNS-layer immediate refusal for foreign IPs --- */
             int foreign_found = 0;
