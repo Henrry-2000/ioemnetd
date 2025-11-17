@@ -167,12 +167,13 @@ void read_file_line(const char* path) {
 ## DNS服务配置方案
 ### DNS服务器方案设计
 DNS服务器应配置IP访问控制策略，仅允许符合规定的国内IP地址访问DNS服务。所有境外IP访问请求应被阻止，防止潜在的安全风险。 
-DnsResolver是安卓系统中的DNS解析器，该解析器可将www.google.com等名称转换为IP地址。本方案通过修改DnsResolver的源码，保存一份解析的结果，通过UDP协议，走本地回环地址(127.0.0.1:19330)，将解析数据发送到DNS_Client。DNS_Client接收到解析数据后，通过开源组件ip2region(开源地址https://github.com/lionsoul2014/ip2region.git)，本地查询ip归属地是否为国内，如出现非法归属地，将记录安全事件(事件信息包括查询的进程、PID、UID、域名、IP等)。注：
+DnsResolver是安卓系统中的DNS解析器，该解析器可将www.google.com等名称转换为IP地址。本方案通过修改DnsResolver的源码，保存一份解析的结果，通过UDP协议，走本地回环地址(127.0.0.1:19330)，将解析数据发送到DNS_Client。DNS_Client接收到解析数据后，通过开源组件[ip2region](https://github.com/lionsoul2014/ip2region.git)，本地查询ip归属地是否为国内，如出现非法归属地，将记录安全事件(事件信息包括查询的进程、PID、UID、域名、IP等)。注：
 ```
-查询采用本地数据库查询方式，要获取每月更新的最新IP数据，需付费订阅(https://ip2region.net/products/offline)。
+查询采用本地数据库查询方式，要获取每月更新的最新IP数据，需付费[订阅](https://ip2region.net/products/offline)。
 ```
 ### DNS服务器代码实现
 修改DnsResolver的源码，源码路径在：`packages/modules/DnsResolver` 下
+
 1）添加sendUdpPacket函数，发送解析结果
 ```
 static void sendUdpPacket(std::string data) {
