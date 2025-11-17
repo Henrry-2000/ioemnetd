@@ -256,6 +256,7 @@ if (!success) {
 
 std::vector<std::string> ip_addrs;
 const int total_ip_addr_count = extractGetAddrInfoAnswers(result, &ip_addrs);
+//增加如下内容
 std::string buf;
 if(total_ip_addr_count > 0)
 {
