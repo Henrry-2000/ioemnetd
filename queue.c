@@ -1,16 +1,8 @@
-/**
- * @file queue.c
- * @author your name (you@domain.com)
- * @brief
- * @version 0.1
- * @date 2025-07-15
- *
- * @copyright Copyright (c) 2025
- *
- */
+// system/netd/ioemnetd/queue.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "queue.h"
 
 static int lock;
@@ -20,25 +12,11 @@ while(!atomic_cas(ptr,0,1))
 #define atomic_unlock(ptr)\
 while(!atomic_cas(ptr,1,0))
 
-/**
- * 原子锁加锁
- * @param 
- * null
- * @return 
- * null
- */
 void atomic_lock_api(void)
 {
     atomic_lock(&lock);
 }
 
-/**
- * 原子锁解锁
- * @param 
- * null
- * @return 
- * null
- */
 void atomic_unlock_api(void)
 {
     atomic_unlock(&lock);
@@ -46,11 +24,6 @@ void atomic_unlock_api(void)
 
 BUF_LIST *g_queue; // 全局队列指针
 
-/**
- * @brief 初始化队列
- *
- * @return ERROR_MESSAGE_T
- */
 ERROR_MESSAGE_T QueueInit()
 {
     ERROR_MESSAGE_T ret = SUCCESS;
@@ -71,21 +44,16 @@ ERROR_MESSAGE_T QueueInit()
     return ret;
 }
 
-/**
- * @brief 入队列
- *
- * @param data 数据指针
- * @param len 数据长度
- * @return ERROR_MESSAGE_T 错误码
- * @note
+/*
+ * Modified BufferInQueue to accept client sockaddr and length,
+ * store them inside the List_Node so that consumers can reply to client.
  */
-ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len)
+ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len, const struct sockaddr *cli, socklen_t cli_len)
 {
     ERROR_MESSAGE_T ret = SUCCESS;
     BUF_LIST *list = g_queue;
     do
     {
-        //* 空的队列头
         if (list == NULL)
         {
             printf("g_queue is NULL!");
@@ -93,13 +61,14 @@ ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len)
             break;
         }
 
-        if ((len > 1024) || (len < 20)) // 单个报文最大
+        if ((len > 1024) || (len < 20)) // 单个报文最大/最小校验
         {
-            printf("packet is to long.or too small\n");
+            printf("packet is too long or too small\n");
             ret = DATA_INVALID;
             break;
         }
 
+        // allocate node with room for addr and data
         struct List_Node *pnew = (struct List_Node *)malloc(sizeof(struct List_Node) + len);
         if (pnew == NULL)
         {
@@ -107,10 +76,21 @@ ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len)
             break;
         }
 
-        memcpy(pnew->data, data, len); // 入队的数据
+        // initialize node fields
         pnew->len = len;
+        // copy client addr (if provided). If cli is NULL, zero addr_len.
+        if (cli != NULL && cli_len > 0 && cli_len <= sizeof(pnew->addr)) {
+            memcpy(&pnew->addr, cli, cli_len);
+            pnew->addr_len = cli_len;
+        } else {
+            memset(&pnew->addr, 0, sizeof(pnew->addr));
+            pnew->addr_len = 0;
+        }
 
-        //* 进入临界区
+        // copy payload
+        memcpy(pnew->data, data, len);
+
+        // push into list
         LOCK();
         LIST_RPUSH(list, pnew);
         UNLOCK();
@@ -120,12 +100,6 @@ ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len)
     return ret;
 }
 
-/**
- * @brief 判断长度是为为空
- *
- * @return ERROR_MESSAGE_T TRUE为空，FALSE不为空
- * @note
- */
 uint8 IsEmptyQueue()
 {
     ERROR_MESSAGE_T ret = TRUE;
@@ -135,7 +109,6 @@ uint8 IsEmptyQueue()
     }
     else
     {
-        //* 进入临界区
         LOCK();
         int len = g_queue->size;
         UNLOCK();
@@ -145,13 +118,6 @@ uint8 IsEmptyQueue()
     return ret;
 }
 
-/**
- * @brief 出队列
- *
- * @param node 指向节点指针的指针
- * @return ERROR_MESSAGE_T
- * @note
- */
 ERROR_MESSAGE_T BufferOutQueue(struct List_Node **node)
 {
     ERROR_MESSAGE_T ret = SUCCESS;
@@ -165,12 +131,11 @@ ERROR_MESSAGE_T BufferOutQueue(struct List_Node **node)
             break;
         }
 
-        struct List_Node *ppop = NULL; // 出对的节点
+        struct List_Node *ppop = NULL; // 出队节点
         LOCK();
         LIST_LPOP(list, ppop);
         UNLOCK();
 
-        //! 出对前判断队列不为空，但是出现了出队失败
         if (ppop == NULL)
         {
             ret = BUF_EMPTY;
@@ -196,12 +161,7 @@ int GetQueueSize(void)
     }
     return size;
 }
-/**
- * @brief 队列销毁
- *
- * @return void
- * @note
- */
+
 void bufferDestroy(void)
 {
     if (g_queue != NULL)
@@ -211,15 +171,10 @@ void bufferDestroy(void)
 }
 
 #ifdef DEBUG
-/**
- * @brief 显示队列内容
- *
- * @note
- */
 void ShowQueue(void)
 {
     BUF_LIST *list = g_queue;
-    if (IsEmptyQueue() == TRUE) // 队列为空
+    if (IsEmptyQueue() == TRUE)
     {
         printf("Queue is empty\n");
     }

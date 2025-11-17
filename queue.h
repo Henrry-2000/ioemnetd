@@ -1,16 +1,9 @@
-/**
- * @file queue.h
- * @author your name (you@domain.com)
- * @brief 
- * @version 0.1
- * @date 2025-07-15
- * 
- * @copyright Copyright (c) 2025
- * 
- */
+// system/netd/ioemnetd/queue.h
 #ifndef QUEUE_H
 #define QUEUE_H
 
+#include <sys/types.h>
+#include <sys/socket.h>  // for struct sockaddr_storage, socklen_t
 
 typedef unsigned char uint8;
 typedef unsigned short uint16;
@@ -29,7 +22,7 @@ typedef enum ERROR_MESSAGE{
     FILE_OPEN_FAIL,     //文件打开失败
 }ERROR_MESSAGE_T;
 
-//* 判断是否可入队
+/* 判断是否可入队 */
 #define LIST_JUDGE_IN(max_pck, max_len, list, ret)       \
     do                                                       \
     {                                                        \
@@ -39,7 +32,7 @@ typedef enum ERROR_MESSAGE{
             ret = ETH_FALSE;                             \
     } while (0);
 
-//* 列表队尾入队
+/* 列表队尾入队 */
 #define LIST_RPUSH(list, node)          \
     do                                      \
     {                                       \
@@ -59,7 +52,7 @@ typedef enum ERROR_MESSAGE{
         list->len += node->len;             \
     } while (0)
 
-//* 列表队尾出队，node使用前赋空
+/* 列表队尾出队，node使用前赋空 */
 #define LIST_RPOP(list, node)                       \
     do                                                  \
     {                                                   \
@@ -75,7 +68,7 @@ typedef enum ERROR_MESSAGE{
         }                                               \
     } while (0)
 
-//* 列表对首入队
+/* 列表对首入队 */
 #define LIST_LPUSH(list, node)          \
     do                                      \
     {                                       \
@@ -95,7 +88,7 @@ typedef enum ERROR_MESSAGE{
         list->len += node->len;             \
     } while (0)
 
-//* 列表对首出队，node使用前赋空
+/* 列表对首出队，node使用前赋空 */
 #define LIST_LPOP(list, node)                       \
     do                                                  \
     {                                                   \
@@ -111,7 +104,7 @@ typedef enum ERROR_MESSAGE{
         }                                               \
     } while (0)
 
-//* 直接访问列表成员
+/* 直接访问列表成员 */
 #define LIST_GET(list, node)   \
     do                             \
     {                              \
@@ -120,7 +113,7 @@ typedef enum ERROR_MESSAGE{
         list->offset++;            \
     } while (0)
 
-//* 移除列表成员，使用前确定入参非空
+/* 移除列表成员，使用前确定入参非空 */
 #define LIST_REMOVE_NODE(list, node)                                          \
     do                                                                            \
     {                                                                             \
@@ -132,7 +125,7 @@ typedef enum ERROR_MESSAGE{
         --list->size;                                                             \
     } while (0)
 
-//* 列表节点释放
+/* 列表节点释放 */
 #define LIST_NODE_FREE(node) \
     do                           \
     {                            \
@@ -141,7 +134,7 @@ typedef enum ERROR_MESSAGE{
         node = NULL;             \
     } while (0)
 
-//* 队列销毁
+/* 队列销毁 */
 #define LIST_DESTROY(list)               \
     struct List_Node *next;              \
     struct List_Node *curr = list->head; \
@@ -155,20 +148,24 @@ typedef enum ERROR_MESSAGE{
     free(list);                              \
     list = NULL;
 
-//* 队列遍历
+/* 队列遍历 */
 #define LIST_FOR_EACH(list) for (struct List_Node *curr = list->head; curr != NULL; curr = curr->next)
 
-// 数据节点
+/* 数据节点 */
 typedef struct List_Node
 {
     struct List_Node *prev;
     struct List_Node *next;
 
     unsigned int len; // 数据长度
-    unsigned char data[];
-} __attribute__((packed)) List_Node_ST;
 
-// 队列结构
+    socklen_t addr_len; // 客户端地址长度
+    struct sockaddr_storage addr; // 存储客户端地址（支持 IPv4/IPv6）
+
+    unsigned char data[]; // 灵活数组，实际大小为 len
+} __attribute__((packed)) List_Node;
+
+/* 队列结构 */
 typedef struct BUF_LIST_ST
 {
     struct List_Node *head; // 对列头节点
@@ -179,27 +176,19 @@ typedef struct BUF_LIST_ST
 
 /*************************************
 * @brief 原子锁加锁
-* @param 参数1：NULL
-* @return 无
+* ...
 *************************************/
 void atomic_lock_api(void);
-/*************************************
-* @brief 原子锁解锁
-* @param 参数1：NULL
-* @return 无
-*************************************/
 void atomic_unlock_api(void);
 
 #define LOCK()      atomic_lock_api()
 #define UNLOCK()    atomic_unlock_api()
 
-//* TODO:区分不同编译器对likely的命名
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+/* other macros ... */
 
-/****************************函数接口定义************************************************************/
 ERROR_MESSAGE_T QueueInit(void);
-ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len);
+// Modified prototype: include client addr and addr_len
+ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len, const struct sockaddr *cli, socklen_t cli_len);
 ERROR_MESSAGE_T BufferOutQueue(struct List_Node **node);
 uint8 IsEmptyQueue(void);
 void bufferDestroy(void);
