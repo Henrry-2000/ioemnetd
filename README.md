@@ -54,7 +54,9 @@ interface IOemNetd {
 }
 ```
 2、在OemNetdListener.cpp、OemNetdListener.h中添加set_iptables_rules的实现
+
 3、实现客户端，读取配置文件，调用oemnetd中的接口加载防火墙
+
 1）初始化服务
 ```
 int NetdBinderInit() {
