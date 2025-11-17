@@ -1,4 +1,5 @@
 # ioemnetd
+ioemnetd 代码仓库包含安卓防火墙以及DNS服务。
 ## 安卓防火墙介绍
 Netd是Android的网络守护进程。封装了复杂的底层各种类型的网络(NAT，PLAN，PPP，SOFTAP，TECHER，ETHO，MDNS等)，隔离了底层网络接口的差异，给Framework提供了统一调用接口，简化了网络的使用。Netd主要功能是:第一、接收Framework的网络请求，处理请求，向Framework层反馈处理结果；第二、监听网络事件(断开/连接/错误等)，向Framework层上报。本方案将加载防火墙规则的接口实现在Netd组件中。通过在Oemnetd中添加加载防火墙规则的接口，并由客户端进程读取配置文件，调用加载接口，实现系统防火墙的加载。
 针对配置文件读取异常的情况，将采用读取备份规则的方式进行加载,并记录配置文件读取失败的情况。
@@ -163,6 +164,117 @@ void read_file_line(const char* path) {
 }
 ```
 
+## DNS服务配置方案
+### DNS服务器方案设计
+DNS服务器应配置IP访问控制策略，仅允许符合规定的国内IP地址访问DNS服务。所有境外IP访问请求应被阻止，防止潜在的安全风险。 
+DnsResolver是安卓系统中的DNS解析器，该解析器可将www.google.com等名称转换为IP地址。本方案通过修改DnsResolver的源码，保存一份解析的结果，通过UDP协议，走本地回环地址(127.0.0.1:19330)，将解析数据发送到DNS_Client。DNS_Client接收到解析数据后，通过开源组件ip2region(开源地址https://github.com/lionsoul2014/ip2region.git)，本地查询ip归属地是否为国内，如出现非法归属地，将记录安全事件(事件信息包括查询的进程、PID、UID、域名、IP等)。注：
+```
+查询采用本地数据库查询方式，要获取每月更新的最新IP数据，需付费订阅(https://ip2region.net/products/offline)。
+```
+### DNS服务器代码实现
+修改DnsResolver的源码，源码路径在：`packages/modules/DnsResolver` 下
+1）添加sendUdpPacket函数，发送解析结果
+```
+static void sendUdpPacket(std::string data) {
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        LOG(ERROR) << "UDP socket creation failed: " << strerror(errno);
+        return;
+    }
+
+    struct sockaddr_in servaddr;
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(19330);
+
+    if (inet_pton(AF_INET, "127.0.0.1", &servaddr.sin_addr) <= 0) {
+        LOG(ERROR) << "inet_pton failed";
+        close(sockfd);
+        return;
+    }
+
+    ssize_t sent = sendto(sockfd, data.c_str(), data.size() + 1, 0,
+                          (const struct sockaddr*)&servaddr, sizeof(servaddr));
+    if (sent < 0) {
+        LOG(ERROR) << "UDP send failed: " << strerror(errno);
+    }
+
+    close(sockfd);
+}
+```
+2）在DNS解析函数中，添加获取DNS解析结果并发送的代码，关键代码片段如下：
+```
+void DnsProxyListener::GetAddrInfoHandler::run() {
+    LOG(INFO) << "GetAddrInfoHandler::run: {" << mNetContext.toString() << "}";
+    addrinfo* result = nullptr;
+    Stopwatch s;
+    maybeFixupNetContext(&mNetContext, mClient->getPid());
+    const uid_t uid = mClient->getUid();
+    int32_t pid = mClient->getPid(); //获取pid
+    int32_t rv = 0;
+    InitDnsEventReport(mNetContext);
+    if (!startQueryLimiter(uid)) {
+        const char* host = mHost.starts_with("^") ? nullptr : mHost.c_str();
+        const char* service = mService.starts_with("^") ? nullptr : mService.c_str();
+        if (evaluate_domain_name(mNetContext, host)) {
+            rv = resolv_getaddrinfo(host, service, mHints.get(), &mNetContext, &result, &event);
+        } else {
+            rv = EAI_SYSTEM;
+        }
+        endQueryLimiter(uid);
+    } else {
+        // Note that this error code is currently not passed down to the client.
+        // android_getaddrinfo_proxy() returns EAI_NODATA on any error.
+        rv = EAI_ERROR;
+        LOG(ERROR) << "GetAddrInfoHandler::run: from UID " << uid
+                   << ", max concurrent queries reached";
+    }
+// 这里省略11行
+    success = mClient->sendBinaryMsg(ResponseCode::DnsProxyOperationFailed, &rv, sizeof(rv));
+} else {
+    success = mClient->sendCode(ResponseCode::DnsProxyQueryResult);
+    addrinfo* ai = result;
+    while (ai && success) {
+        success = sendBE32(mClient, 1) && sendaddrinfo(mClient, ai);
+        ai = ai->ai_next;
+    }
+    success = success && sendBE32(mClient, 0);
+}
+
+if (!success) {
+    PLOG(WARNING) << "GetAddrInfoHandler::run: Error writing DNS result to client uid " << uid
+                  << " pid " << mClient->getPid();
+}
+
+std::vector<std::string> ip_addrs;
+const int total_ip_addr_count = extractGetAddrInfoAnswers(result, &ip_addrs);
+std::string buf;
+if(total_ip_addr_count > 0)
+{
+    buf += "DnsRet:success,domain:";
+    buf += mHost;
+    buf += ",UID:";
+    buf += std::to_string(uid);
+    buf += ",PID:";
+    buf += std::to_string(pid);
+    buf += ",";
+    if(!ip_addrs.empty())
+    {
+        for(size_t i = 0; i < ip_addrs.size();i++)
+        {
+            buf+=ip_addrs[i];
+            buf+=",";
+        }
+    }
+    LOG(INFO) << buf;
+    sendUdpPacket(buf); //调用sendUdpPacket 发送udp报文，包含DNS解析结果
+}
+
+reportDnsEvent(InetdEventListener::EVENT_GETADDRINFO, mNetContext, latencyUs, rv, event, mHost,
+               ip_addrs, total_ip_addr_count);
+freeaddrinfo(result);
+```
 ## 初始化步骤
 0、将工程文件解压到aosp根路径下的system/netd/中
 1、初始化环境
