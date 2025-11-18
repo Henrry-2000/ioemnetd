@@ -216,6 +216,102 @@ void *udp_server_loop(void *arg)
     {
         socklen_t len = sizeof(client_addr);
         int n = recvfrom(server_fd, buffer, MAX_LEN, 0, (struct sockaddr *)&client_addr, &len);
+        // 在 udp_server_loop 中收到 n = recvfrom(...)
+        if (n >= 38) { // minimal header size
+            uint32_t magic;
+            memcpy(&magic, buffer, 4);
+            magic = ntohl(magic);
+            if (magic == 0x444E5344) {
+                uint16_t version;
+                memcpy(&version, buffer + 4, 2);
+                version = ntohs(version);
+                if (version == 1) {
+                    // safe-parse fields with bounds checks
+                    uint64_t req_id_be;
+                    memcpy(&req_id_be, buffer + 8, 8);
+                    uint64_t req_id = ntohll(req_id_be);
+                    uint32_t uid, pid;
+                    memcpy(&uid, buffer + 16, 4);
+                    memcpy(&pid, buffer + 20, 4);
+                    uid = ntohl(uid); pid = ntohl(pid);
+                    uint16_t familyNet, addrLenNet;
+                    uint16_t portNet;
+                    uint32_t ipCountNet, domainLenNet;
+                    memcpy(&familyNet, buffer + 24, 2);
+                    memcpy(&addrLenNet, buffer + 26, 2);
+                    memcpy(&portNet, buffer + 28, 2);
+                    memcpy(&ipCountNet, buffer + 30, 4);
+                    memcpy(&domainLenNet, buffer + 34, 4);
+                    uint16_t family = ntohs(familyNet);
+                    uint16_t addrLen = ntohs(addrLenNet);
+                    uint16_t port = ntohs(portNet);
+                    uint32_t ipCount = ntohl(ipCountNet);
+                    uint32_t domainLen = ntohl(domainLenNet);
+
+                    size_t needed = 38 + addrLen + domainLen;
+                    // each ip entry at least 2 bytes length
+                    size_t offset = 38;
+                    if (needed > (size_t)n) {
+                        // malformed; fall through to normal handling
+                    } else {
+                        // parse client addr (offset .. offset+addrLen-1)
+                        unsigned char ipbuf[16] = {0};
+                        memcpy(ipbuf, buffer + offset, addrLen);
+                        offset += addrLen;
+                        // skip domain
+                        offset += domainLen;
+                        // parse ip list
+                        int any_foreign = 0;
+                        for (uint32_t i = 0; i < ipCount; i++) {
+                            if (offset + 2 > (size_t)n) { break; }
+                            uint16_t ipLenNet2;
+                            memcpy(&ipLenNet2, buffer + offset, 2);
+                            offset += 2;
+                            uint16_t ipLen2 = ntohs(ipLenNet2);
+                            if (offset + ipLen2 > (size_t)n) break;
+                            char iptext[64] = {0};
+                            if (ipLen2 == 4) {
+                                inet_ntop(AF_INET, buffer + offset, iptext, sizeof(iptext));
+                            } else if (ipLen2 == 16) {
+                                inet_ntop(AF_INET6, buffer + offset, iptext, sizeof(iptext));
+                            } else {
+                                iptext[0] = '\0';
+                            }
+                            offset += ipLen2;
+
+                            // check ip via ip2region
+                            char is_china = 0;
+                            int rc = search_ip_string((char*)iptext, &is_china);
+                            if (rc != 0) {
+                                // lookup fail -> conservative: treat as foreign
+                                any_foreign = 1;
+                                break;
+                            }
+                            if (is_china == 0) {
+                                any_foreign = 1;
+                                break;
+                            }
+                        }
+
+                        // prepare and send reply: req_id + verdict
+                        uint8_t resp[9];
+                        memcpy(resp, &req_id_be, 8);
+                        resp[8] = (any_foreign ? 1 : 0);
+                        ssize_t wr = sendto(server_fd, resp, sizeof(resp), 0,
+                                            (struct sockaddr *)&client_addr, len);
+                        if (wr < 0) {
+                            ALOGE("control reply sendto failed: %s", strerror(errno));
+                        } else {
+                            ALOGI("control reply sent req_id=%llu verdict=%d", (unsigned long long)req_id, any_foreign);
+                        }
+
+                        // OPTIONAL: continue to enqueue event for logging (existing logic)
+                        continue;
+                    }
+                }
+            }
+        }
+
         if (n < 0)
         {
             printf("recvfrom error: %s(errno: %d)\n", strerror(errno), errno);

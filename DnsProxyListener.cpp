@@ -68,10 +68,240 @@ using android::base::ParseInt;
 using android::base::ParseUint;
 using std::span;
 
+// --- 新增 includes ---
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <poll.h>
+#include <time.h>
+#include <vector>
+#include <atomic>
+#include <endian.h> // 如果不可用，可用下方的替代函数
+
+// portable htonll / ntohll
+#if !defined(htonll)
+static inline uint64_t htonll(uint64_t x) {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+    return ((uint64_t)htonl(x & 0xFFFFFFFF) << 32) | htonl(x >> 32);
+#else
+    return x;
+#endif
+}
+static inline uint64_t ntohll(uint64_t x) { return htonll(x); }
+#endif
+
+static void append_bytes(std::vector<uint8_t>& buf, const void* p, size_t n) {
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(p);
+    buf.insert(buf.end(), b, b + n);
+}
+
 namespace android {
 
 using netdutils::ResponseCode;
 using netdutils::Stopwatch;
+
+// 返回: 0 = ALLOW, 1 = DENY, -1 = error/timeout
+static int askDnsClientAndWaitVerdict(uint64_t reqId,
+                                      const std::string& domain,
+                                      const std::vector<std::string>& ipAddrs,
+                                      uid_t uid,
+                                      int pid,
+                                      const struct sockaddr* clientAddr,
+                                      socklen_t clientAddrLen,
+                                      int timeoutMs /* default 200 */) {
+    int s = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) {
+        PLOG(ERROR) << "askDnsClient: socket failed";
+        return -1;
+    }
+
+    std::vector<uint8_t> buf;
+    uint32_t magic = htonl(0x444E5344);
+    uint16_t version = htons(1);
+    uint16_t reserved = htons(0);
+    uint64_t reqIdBe = htonll(reqId);
+    uint32_t uidNet = htonl(static_cast<uint32_t>(uid));
+    uint32_t pidNet = htonl(static_cast<uint32_t>(pid));
+
+    append_bytes(buf, &magic, sizeof(magic));
+    append_bytes(buf, &version, sizeof(version));
+    append_bytes(buf, &reserved, sizeof(reserved));
+    append_bytes(buf, &reqIdBe, sizeof(reqIdBe));
+    append_bytes(buf, &uidNet, sizeof(uidNet));
+    append_bytes(buf, &pidNet, sizeof(pidNet));
+
+    uint16_t familyNet = htons(clientAddr ? clientAddr->sa_family : AF_INET);
+    uint16_t addrLen = (clientAddr && clientAddr->sa_family == AF_INET) ? 4 : 16;
+    uint16_t addrLenNet = htons(addrLen);
+    uint16_t portNet = 0;
+    if (clientAddr && clientAddr->sa_family == AF_INET) {
+        const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(clientAddr);
+        portNet = sin->sin_port; // already network order
+    } else if (clientAddr && clientAddr->sa_family == AF_INET6) {
+        const struct sockaddr_in6* sin6 = reinterpret_cast<const struct sockaddr_in6*>(clientAddr);
+        portNet = sin6->sin6_port;
+    }
+    append_bytes(buf, &familyNet, sizeof(familyNet));
+    append_bytes(buf, &addrLenNet, sizeof(addrLenNet));
+    append_bytes(buf, &portNet, sizeof(portNet));
+
+    uint32_t ipCountNet = htonl(static_cast<uint32_t>(ipAddrs.size()));
+    uint32_t domainLenNet = htonl(static_cast<uint32_t>(domain.size()));
+    append_bytes(buf, &ipCountNet, sizeof(ipCountNet));
+    append_bytes(buf, &domainLenNet, sizeof(domainLenNet));
+
+    // append client ip bytes
+    if (clientAddr) {
+        if (clientAddr->sa_family == AF_INET) {
+            const struct sockaddr_in* sin = reinterpret_cast<const struct sockaddr_in*>(clientAddr);
+            append_bytes(buf, &sin->sin_addr.s_addr, 4);
+        } else if (clientAddr->sa_family == AF_INET6) {
+            const struct sockaddr_in6* sin6 = reinterpret_cast<const struct sockaddr_in6*>(clientAddr);
+            append_bytes(buf, &sin6->sin6_addr, 16);
+        } else {
+            // default 0.0.0.0
+            uint32_t zero = 0;
+            append_bytes(buf, &zero, 4);
+        }
+    } else {
+        uint32_t zero = 0;
+        append_bytes(buf, &zero, 4);
+    }
+
+    // domain
+    if (!domain.empty()) append_bytes(buf, domain.data(), domain.size());
+
+    // ip list
+    for (const auto& ipStr : ipAddrs) {
+        uint8_t ipBuf[16] = {0};
+        int af = strchr(ipStr.c_str(), ':') ? AF_INET6 : AF_INET;
+        if (af == AF_INET) {
+            if (inet_pton(AF_INET, ipStr.c_str(), ipBuf) != 1) continue;
+            uint16_t ipLenNet = htons(4);
+            append_bytes(buf, &ipLenNet, sizeof(ipLenNet));
+            append_bytes(buf, ipBuf, 4);
+        } else {
+            if (inet_pton(AF_INET6, ipStr.c_str(), ipBuf) != 1) continue;
+            uint16_t ipLenNet = htons(16);
+            append_bytes(buf, &ipLenNet, sizeof(ipLenNet));
+            append_bytes(buf, ipBuf, 16);
+        }
+    }
+
+    // dst = 127.0.0.1:19330
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(19330);
+    inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
+
+    ssize_t sent = sendto(s, buf.data(), buf.size(), 0, reinterpret_cast<struct sockaddr*>(&dst), sizeof(dst));
+    if (sent < 0) {
+        PLOG(ERROR) << "askDnsClient: sendto failed";
+        close(s);
+        return -1;
+    }
+
+    // wait for response
+    struct pollfd pfd;
+    pfd.fd = s;
+    pfd.events = POLLIN;
+    int pret = poll(&pfd, 1, timeoutMs);
+    if (pret <= 0) {
+        if (pret == 0) LOG(WARNING) << "askDnsClient: timeout after " << timeoutMs << "ms";
+        else PLOG(WARNING) << "askDnsClient: poll error";
+        close(s);
+        return -1;
+    }
+
+    uint8_t rbuf[16];
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+    ssize_t r = recvfrom(s, rbuf, sizeof(rbuf), 0, reinterpret_cast<struct sockaddr*>(&from), &fromlen);
+    if (r < (ssize_t)(sizeof(uint64_t) + 1)) {
+        LOG(WARNING) << "askDnsClient: short response";
+        close(s);
+        return -1;
+    }
+
+    uint64_t rreq;
+    memcpy(&rreq, rbuf, sizeof(rreq));
+    rreq = ntohll(rreq);
+    if (rreq != reqId) {
+        LOG(WARNING) << "askDnsClient: mismatched reqId";
+        close(s);
+        return -1;
+    }
+    uint8_t verdict = rbuf[8];
+    close(s);
+    return (verdict == 1) ? 1 : 0;
+}
+// reqBuf: 原始 DNS request bytes, reqLen: length
+// cli: 原始客户端 sockaddr, cliLen: length
+static void sendDnsRefusedToClient(const unsigned char* reqBuf, size_t reqLen,
+                                   const struct sockaddr* cli, socklen_t cliLen) {
+    if (!reqBuf || reqLen < 12 || !cli) return;
+    // compute question length
+    auto get_question_len = [](const unsigned char* buf, size_t len) -> size_t {
+        if (len < 12) return 0;
+        uint16_t qdcount = ntohs(*(uint16_t*)(buf + 4));
+        size_t off = 12;
+        for (int qi = 0; qi < qdcount; ++qi) {
+            // walk QNAME labels
+            while (off < len) {
+                uint8_t lab = buf[off++];
+                if (lab == 0) break;
+                if ((lab & 0xC0) == 0xC0) {
+                    // compression pointer inside QNAME => unsupported; abort
+                    return 0;
+                }
+                off += lab;
+            }
+            if (off + 4 > len) return 0; // QTYPE+QCLASS
+            off += 4;
+        }
+        return off - 12; // question length bytes
+    };
+
+    size_t qlen = get_question_len(reqBuf, reqLen);
+    if (qlen == 0) {
+        LOG(WARNING) << "sendDnsRefusedToClient: cannot parse question";
+        return;
+    }
+
+    size_t respLen = 12 + qlen;
+    std::vector<uint8_t> resp(respLen);
+    // ID
+    memcpy(&resp[0], reqBuf, 2);
+    // flags: take request flags, set QR and RCODE=5
+    uint16_t flags = ntohs(*(uint16_t*)(reqBuf + 2));
+    flags |= 0x8000; // QR = 1
+    flags = (flags & 0xFFF0) | (5 & 0xF); // set RCODE=5
+    uint16_t flagsNet = htons(flags);
+    memcpy(&resp[2], &flagsNet, 2);
+    // QDCOUNT: copy from request
+    memcpy(&resp[4], reqBuf + 4, 2);
+    // ANCOUNT/NS/AR = 0
+    memset(&resp[6], 0, 6);
+    // copy question
+    memcpy(&resp[12], reqBuf + 12, qlen);
+
+    // send via UDP socket
+    int s = ::socket(clientAddrFamily(cli), SOCK_DGRAM, 0);
+    if (s < 0) {
+        PLOG(ERROR) << "sendDnsRefusedToClient: socket failed";
+        return;
+    }
+    ssize_t sent = sendto(s, resp.data(), respLen, 0, cli, cliLen);
+    if (sent < 0) {
+        PLOG(ERROR) << "sendDnsRefusedToClient: sendto failed";
+    } else {
+        LOG(INFO) << "sendDnsRefusedToClient: sent " << sent << " bytes, RCODE=5";
+    }
+    close(s);
+}
+
 
 namespace net {
 namespace {
