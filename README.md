@@ -54,7 +54,7 @@ interface IOemNetd {
     String set_iptables_rules(int v4v6, int type, String rules);
 }
 ```
-2、在OemNetdListener.cpp、OemNetdListener.h中添加set_iptables_rules的实现
+2、在`OemNetdListener.cpp`、`OemNetdListener.h`中添加`set_iptables_rules`的实现，具体见代码仓库
 
 3、实现客户端，读取配置文件，调用oemnetd中的接口加载防火墙
 
@@ -178,9 +178,9 @@ DNS服务器应配置IP访问控制策略，仅允许符合规定的国内IP地�
 DnsResolver是安卓系统中的DNS解析器，该解析器可将www.google.com等名称转换为IP地址。本方案通过修改DnsResolver的源码，保存一份解析的结果，通过UDP协议，走本地回环地址(127.0.0.1:19330)，将解析数据发送到DNS_Client。DNS_Client接收到解析数据后，通过开源组件[ip2region](https://github.com/lionsoul2014/ip2region.git)，本地查询ip归属地是否为国内，如出现非法归属地，将记录安全事件(事件信息包括查询的进程、PID、UID、域名、IP等)。注：查询采用本地数据库查询方式，要获取每月更新的最新IP数据，需付费[订阅](https://ip2region.net/products/offline)。
 
 ### DNS服务器代码实现
-修改DnsProxyListener的源码，源码路径在：`packages/modules/DnsResolver` 下
+修改`DnsProxyListener.cpp`，该文件为安卓源码，相对路径在：`packages/modules/DnsResolver` 下
 
-1）添加sendUdpPacket函数，发送解析结果
+1）添加`sendUdpPacket`函数，发送解析结果
 ```
 static void sendUdpPacket(std::string data) {
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -237,51 +237,60 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
         LOG(ERROR) << "GetAddrInfoHandler::run: from UID " << uid
                    << ", max concurrent queries reached";
     }
-// 这里省略11行
-    success = mClient->sendBinaryMsg(ResponseCode::DnsProxyOperationFailed, &rv, sizeof(rv));
-} else {
-    success = mClient->sendCode(ResponseCode::DnsProxyQueryResult);
-    addrinfo* ai = result;
-    while (ai && success) {
-        success = sendBE32(mClient, 1) && sendaddrinfo(mClient, ai);
-        ai = ai->ai_next;
-    }
-    success = success && sendBE32(mClient, 0);
-}
 
-if (!success) {
-    PLOG(WARNING) << "GetAddrInfoHandler::run: Error writing DNS result to client uid " << uid
-                  << " pid " << mClient->getPid();
-}
+    doDns64Synthesis(&rv, &result, &event);
+    const int32_t latencyUs = saturate_cast<int32_t>(s.timeTakenUs());
+    event.set_latency_micros(latencyUs);
+    event.set_event_type(EVENT_GETADDRINFO);
+    event.set_hints_ai_flags((mHints ? mHints->ai_flags : 0));
 
-std::vector<std::string> ip_addrs;
-const int total_ip_addr_count = extractGetAddrInfoAnswers(result, &ip_addrs);
-//增加如下内容
-std::string buf;
-if(total_ip_addr_count > 0)
-{
-    buf += "DnsRet:success,domain:";
-    buf += mHost;
-    buf += ",UID:";
-    buf += std::to_string(uid);
-    buf += ",PID:";
-    buf += std::to_string(pid);
-    buf += ",";
-    if(!ip_addrs.empty())
-    {
-        for(size_t i = 0; i < ip_addrs.size();i++)
-        {
-            buf+=ip_addrs[i];
-            buf+=",";
+    bool success = true;
+    if (rv) {
+        // getaddrinfo failed
+        success = !mClient->sendBinaryMsg(ResponseCode::DnsProxyOperationFailed, &rv, sizeof(rv));
+    } else {
+        success = mClient->sendCode(ResponseCode::DnsProxyQueryResult);
+        addrinfo* ai = result;
+        while (ai && success) {
+            success = sendBE32(mClient, 1) && sendaddrinfo(mClient, ai);
+            ai = ai->ai_next;
         }
+        success = success && sendBE32(mClient, 0);
     }
-    LOG(INFO) << buf;
-    sendUdpPacket(buf); //调用sendUdpPacket 发送udp报文，包含DNS解析结果
-}
-
-reportDnsEvent(InetdEventListener::EVENT_GETADDRINFO, mNetContext, latencyUs, rv, event, mHost,
-               ip_addrs, total_ip_addr_count);
-freeaddrinfo(result);
+    
+    if (!success) {
+        PLOG(WARNING) << "GetAddrInfoHandler::run: Error writing DNS result to client uid " << uid
+                      << " pid " << mClient->getPid();
+    }
+    
+    std::vector<std::string> ip_addrs;
+    const int total_ip_addr_count = extractGetAddrInfoAnswers(result, &ip_addrs);
+    //增加如下内容
+    std::string buf;
+    if(total_ip_addr_count > 0)
+    {
+        buf += "DnsRet:success,domain:";
+        buf += mHost;
+        buf += ",UID:";
+        buf += std::to_string(uid);
+        buf += ",PID:";
+        buf += std::to_string(pid);
+        buf += ",";
+        if(!ip_addrs.empty())
+        {
+            for(size_t i = 0; i < ip_addrs.size();i++)
+            {
+                buf+=ip_addrs[i];
+                buf+=",";
+            }
+        }
+        LOG(INFO) << buf;
+        sendUdpPacket(buf); //调用sendUdpPacket 发送udp报文，包含DNS解析结果
+    }
+    
+    reportDnsEvent(InetdEventListener::EVENT_GETADDRINFO, mNetContext, latencyUs, rv, event, mHost,
+                   ip_addrs, total_ip_addr_count);
+    freeaddrinfo(result);
 ```
 
 ### 境外IP拦截方案设计与实现
