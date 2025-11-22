@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include "queue.h"
 
 static int lock;
@@ -48,7 +47,7 @@ ERROR_MESSAGE_T QueueInit()
  * Modified BufferInQueue to accept client sockaddr and length,
  * store them inside the List_Node so that consumers can reply to client.
  */
-ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len, const struct sockaddr *cli, socklen_t cli_len)
+ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len)
 {
     ERROR_MESSAGE_T ret = SUCCESS;
     BUF_LIST *list = g_queue;
@@ -78,15 +77,6 @@ ERROR_MESSAGE_T BufferInQueue(const uint8 *data, uint32 len, const struct sockad
 
         // initialize node fields
         pnew->len = len;
-        // copy client addr (if provided). If cli is NULL, zero addr_len.
-        if (cli != NULL && cli_len > 0 && cli_len <= sizeof(pnew->addr)) {
-            memcpy(&pnew->addr, cli, cli_len);
-            pnew->addr_len = cli_len;
-        } else {
-            memset(&pnew->addr, 0, sizeof(pnew->addr));
-            pnew->addr_len = 0;
-        }
-
         // copy payload
         memcpy(pnew->data, data, len);
 

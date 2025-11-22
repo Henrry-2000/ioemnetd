@@ -159,8 +159,6 @@ typedef struct List_Node
 
     unsigned int len; // 数据长度
 
-    socklen_t addr_len; // 客户端地址长度
-    struct sockaddr_storage addr; // 存储客户端地址（支持 IPv4/IPv6）
 
     unsigned char data[]; // 灵活数组，实际大小为 len
 } __attribute__((packed)) List_Node;

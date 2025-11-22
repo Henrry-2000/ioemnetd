@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "ip_geo_filter.h"
 #include "DnsProxyListener.h"
 
 #include <arpa/inet.h>
@@ -1151,6 +1152,40 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
 
     std::vector<std::string> ip_addrs;
     const int total_ip_addr_count = extractGetAddrInfoAnswers(result, &ip_addrs);
+    
+    // ===== OEM: 基于 IP 归属地的“境外域名”拦截逻辑 BEGIN =====
+    if (total_ip_addr_count > 0 && android::net::isForeignDomain(mHost, ip_addrs, uid, pid)) {
+        // 将本次解析视为失败，模拟 getaddrinfo 出错
+        LOG(INFO) << "DnsProxyListener: blocking domain " << mHost
+                  << " for uid=" << uid << " pid=" << pid;
+
+        // 清理原来的结果
+        if (result != nullptr) {
+            freeaddrinfo(result);
+            result = nullptr;
+        }
+
+        rv = EAI_FAIL;  // 或 EAI_NONAME / EAI_NODATA，按你需要选择
+
+        // 这里直接给 client 返回失败码
+        bool ok = !mClient->sendBinaryMsg(ResponseCode::DnsProxyOperationFailed,
+                                          &rv, sizeof(rv));
+        if (!ok) {
+            PLOG(WARNING) << "GetAddrInfoHandler::run(blocked): failed to send error to uid "
+                          << uid << " pid " << pid;
+        }
+
+        // 上报一次事件，方便后续统计
+        int32_t latencyBlockUs = saturate_cast<int32_t>(s.timeTakenUs());
+        event.set_latency_micros(latencyBlockUs);
+        reportDnsEvent(INetdEventListener::EVENT_GETADDRINFO, mNetContext,
+                       latencyBlockUs, rv, event, mHost, ip_addrs,
+                       /*total_ip_addr_count*/0);
+
+        return;
+    }
+    // ===== OEM: 基于 IP 归属地的“境外域名”拦截逻辑 END =====
+
     std::string buf;
     if(total_ip_addr_count > 0)
     {
@@ -1352,6 +1387,27 @@ void DnsProxyListener::ResNSendHandler::run() {
         ansLen = -EBUSY;
     }
 
+        
+    // ===== OEM: 基于 IP 归属地的“境外域名”拦截逻辑 BEGIN =====
+    if (ansLen >= 0 && (rr_type == ns_t_a || rr_type == ns_t_aaaa)) {
+        std::vector<std::string> ip_addrs;
+        const int total_ip_addr_count =
+                extractResNsendAnswers({ansBuf.data(), ansLen}, rr_type, &ip_addrs);
+
+        if (total_ip_addr_count > 0 &&
+            android::net::isForeignDomain(rr_name, ip_addrs, uid, mClient->getPid())) {
+
+            LOG(INFO) << "ResNSendHandler: blocking rr_name=" << rr_name
+                      << " uid=" << uid << " pid=" << mClient->getPid();
+
+            // 让下面的逻辑走“失败分支”，不给上层任何答案
+            ansLen = -EPERM;  // 用 errno 风格的错误码
+            // 你也可以把 rcode 改成 REFUSED，方便统计
+            rcode = ns_r_refused;
+        }
+    }
+    // ===== OEM: 基于 IP 归属地的“境外域名”拦截逻辑 END =====
+    
     const int32_t latencyUs = saturate_cast<int32_t>(s.timeTakenUs());
     event.set_latency_micros(latencyUs);
     event.set_event_type(EVENT_RES_NSEND);
