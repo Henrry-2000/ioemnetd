@@ -461,6 +461,7 @@ void* main_loop(void *arg)
         char domain[128] = {0};
         int uid = 0;
         int pid = 0;
+        // TODO:删除判断逻辑，因为已经在上游dnsProxyListener处理过了
         if(0 == PraseMessage((const char *)node->data, dnsRet, domain, &uid, &pid))
         {
             // 获取进程名称 

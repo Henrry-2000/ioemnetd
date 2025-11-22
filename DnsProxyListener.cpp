@@ -1159,6 +1159,24 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
         LOG(INFO) << "DnsProxyListener: blocking domain " << mHost
                   << " for uid=" << uid << " pid=" << pid;
 
+        // 构建拦截日志报文并发送 UDP
+        std::string buf_blocked;
+        buf_blocked += "DnsRet:blocked,domain:";
+        buf_blocked += mHost;
+        buf_blocked += ",UID:";
+        buf_blocked += std::to_string(uid);
+        buf_blocked += ",PID:";
+        buf_blocked += std::to_string(pid);
+        buf_blocked += ";";
+        if (!ip_addrs.empty()) {
+            for (size_t i = 0; i < ip_addrs.size(); i++) {
+                buf_blocked += ip_addrs[i];
+                buf_blocked += ",";
+            }
+            LOG(INFO) << buf_blocked;
+        }
+        sendUdpPacket(buf_blocked);
+
         // 清理原来的结果
         if (result != nullptr) {
             freeaddrinfo(result);
@@ -1186,27 +1204,27 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
     }
     // ===== OEM: 基于 IP 归属地的“境外域名”拦截逻辑 END =====
 
-    std::string buf;
-    if(total_ip_addr_count > 0)
-    {
-	    buf += "DnsRet:success,domain:";
-	    buf += mHost;
-	    buf += ",UID:";
-	    buf += std::to_string(uid);
-        buf += ",PID:";
-        buf += std::to_string(pid);
-	    buf += ";";
-	    if(!ip_addrs.empty())
-	    {
-		for(size_t i = 0; i < ip_addrs.size();i++)
-		{
-		    buf+=ip_addrs[i];
-		    buf+=",";
-		}
-		LOG(INFO) << buf;
-	    }
-	    sendUdpPacket(buf);
-    }
+    // std::string buf;
+    // if(total_ip_addr_count > 0)
+    // {
+	//     buf += "DnsRet:success,domain:";
+	//     buf += mHost;
+	//     buf += ",UID:";
+	//     buf += std::to_string(uid);
+    //     buf += ",PID:";
+    //     buf += std::to_string(pid);
+	//     buf += ";";
+	//     if(!ip_addrs.empty())
+	//     {
+	// 	for(size_t i = 0; i < ip_addrs.size();i++)
+	// 	{
+	// 	    buf+=ip_addrs[i];
+	// 	    buf+=",";
+	// 	}
+	// 	LOG(INFO) << buf;
+	//     }
+	//     sendUdpPacket(buf);
+    // }
     
     reportDnsEvent(INetdEventListener::EVENT_GETADDRINFO, mNetContext, latencyUs, rv, event, mHost,
                    ip_addrs, total_ip_addr_count);
