@@ -26,6 +26,14 @@ static xdb_searcher_t searcher;
 
 static bool gIpResolverReady = false;
 
+static std::mutex gIpResolverMutex;
+
+enum IpResolverRet {
+    IP_RES_OK = 0,
+    IP_RES_LOAD_VINDEX_FAILED = 1,
+    IP_RES_NEW_SEARCHER_FAILED = 2,
+};
+
 // 默认值为 true，属性解析失败时也当 true
 static bool isForeignBlockEnabled() {
     // 这里如果属性值格式异常，GetBoolProperty 会返回默认值 true
@@ -35,23 +43,23 @@ static bool isForeignBlockEnabled() {
 
 
 static void initIpResolverOnce() {
-    const char* dbPath = nullptr;
+    const char* db_path = nullptr;
 
     // 如果 /data/system 有新版本，就优先用它
     if (access(kDbPathData, R_OK) == 0) {
-        dbPath = kDbPathData;
+        db_path = kDbPathData;
     } else {
-        dbPath = kDbPathSystem;
+        db_path = kDbPathSystem;
     }
 
-    int ret = ip_resolver_init(dbPath);
+    int ret = ip_resolver_init(db_path);
     if (ret == 0) {
         gIpResolverReady = true;
-        LOG(INFO) << "IpGeoFilter: ip_resolver_init OK, db=" << dbPath;
+        LOG(INFO) << "IpGeoFilter: ip_resolver_init OK, db=" << db_path;
     } else {
         gIpResolverReady = false;
         LOG(ERROR) << "IpGeoFilter: ip_resolver_init FAILED, ret=" << ret
-                   << " db=" << dbPath;
+                   << " db=" << db_path;
     }
 }
 
@@ -68,59 +76,59 @@ static void ensureIpResolverInited() {
  * 
  * @return int 
  */
-int ip_resolver_init(const char* dbPath)
-{
-    // 初始化ip_resolver
-    v_index = xdb_load_vector_index_from_file(db_path);
-    if (v_index == NULL) {
-        printf("failed to load vector index from `%s`\n", db_path);
-        return 1;
+int ip_resolver_init(const char* db_path) {
+    std::lock_guard<std::mutex> lk(gIpResolverMutex);
+    if (gIpResolverReady) return IP_RES_OK;
+    xdb_vector_index_t* idx = xdb_load_vector_index_from_file(db_path);
+    if (!idx) {
+        LOG(ERROR) << "failed to load vector index from " << db_path;
+        return IP_RES_LOAD_VINDEX_FAILED;
     }
-
-    // 2、使用全局的 VectorIndex 变量创建带 VectorIndex 缓存的 xdb 查询对象
-    int err = xdb_new_with_vector_index(&searcher, db_path, v_index);
+    int err = xdb_new_with_vector_index(&searcher, db_path, idx);
     if (err != 0) {
-        printf("failed to create vector index cached searcher with errcode=%d\n", err);
-        return 2;
+        LOG(ERROR) << "failed to create searcher err=" << err;
+        xdb_close_vector_index(idx);
+        return IP_RES_NEW_SEARCHER_FAILED;
     }
-    printf("ip2region initialized successfully with database: %s\n", db_path);
-    return 0; // 返回0表示初始化成功
+    v_index = idx;
+    gIpResolverReady = true;
+    return IP_RES_OK;
 }
 
 /**
  * @brief  释放ip_resolver资源
  * 
  */
-void ip_resolver_deinit()
-{
+void ip_resolver_deinit() {
+    std::lock_guard<std::mutex> lk(gIpResolverMutex);
+    if (!gIpResolverReady) return;
     xdb_close(&searcher);
     xdb_close_vector_index(v_index);
+    v_index = nullptr;
+    gIpResolverReady = false;
 }
 
 // 判断某特定的IP是否为域外
 static bool isForeignIp(const std::string& ip) {
     ensureIpResolverInited();  // 每次判断前先确保初始化，但只会真正跑一次
-
-    in_addr v4{};
+    if (!gIpResolverReady) {
+        return false; // 保守策略
+    }
+    in_addr v4={};
     if (inet_pton(AF_INET, ip.c_str(), &v4) == 1) {
-        uint32_t hostOrder = ntohl(v4.s_addr);
-
-        // 初始化失败时，策略你自己选：
-        if (!gIpResolverReady) {
-            // 保守策略：初始化失败也当做不是境外
-            return false;
-        }
-        char* isChina = 0;
-        int ret = search_ip_string(ip.c_str(), &isChina);
-        if (ret == 0)
-        {
-            return (isChina == 0); // 不是中国 IP => “境外”
-        }
-        // 查询失败时，认为不是境外
+        int region = ip_region_lookup(ip.c_str());
+        if (region == -1) return false;
+        return (region == 0);
+    }
+    in6_addr v6={};
+    if (inet_pton(AF_INET6, ip.c_str(), &v6) == 1) {
+        // TODO: 需确认 xdb 支持 IPv6
+        // int region = ip_region_lookup(ip.c_str()); // 需确认 xdb 支持 IPv6
+        // if (region == -1) return true; // 或 false，按策略决定
+        // return (region == 0);
         return false;
     }
-
-    // TODO:IPv6 暂时全部当境外，或者后续扩展
+    // 无法解析格式：按策略处理
     return true;
 }
 
@@ -132,31 +140,16 @@ static bool isForeignIp(const std::string& ip) {
  * @param is_china char* 返回值指针，设置为1表示是中国IP，0表示不是中国IP
  * @return int 
  */
-int search_ip_string(char* ip,char* is_china)
-{
-    long s_time;
+// 返回  1 => China, 0 => Not China, -1 => error
+int ip_region_lookup(const char* ip) {
+    if (!gIpResolverReady) return -1;
     char region_buffer[256] = {0};
-    s_time = xdb_now();
     int err = xdb_search_by_string(&searcher, ip, region_buffer, sizeof(region_buffer));
-    if(err != 0)
-    {
-        printf("failed to search ip `%s` with errcode=%d\n", ip, err);
-        return 1; // 返回1表示查询失败
+    if (err != 0) {
+        LOG(ERROR) << "xdb_search_by_string failed for " << ip << " err=" << err;
+        return -1;
     }
-    else
-    {
-        printf("ip: %s, region: %s, cost: %ld μs\n", ip, region_buffer, xdb_now() - s_time);
-        // 检查是否为中国IP
-        if (strstr(region_buffer, "中国") != NULL)
-        {
-            *is_china = 1; // 设置为1表示是中国IP
-        }
-        else
-        {
-            *is_china = 0; // 设置为0表示不是中国IP
-        }
-    }
-    return 0; // 返回0表示查询成功
+    return (strstr(region_buffer, "中国") != nullptr) ? 1 : 0;
 }
 
 bool isForeignDomain(const std::string& host,
