@@ -1153,8 +1153,19 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
     std::vector<std::string> ip_addrs;
     const int total_ip_addr_count = extractGetAddrInfoAnswers(result, &ip_addrs);
     
+
+    std::string ips;
+    for (const auto& ip : ip_addrs) {
+        ips += ip;
+        ips += ",";
+    }
+    bool isForeign = android::net::isForeignDomain(mHost, ip_addrs, uid, pid);
+    LOG(INFO) << "IpGeoFilter: host=" << mHost
+            << " uid=" << uid << " pid=" << pid
+            << " ip_addrs=" << ips
+            << " decision=" << (isForeign ? "BLOCK" : "ALLOW");
     // ===== OEM: 基于 IP 归属地的“境外域名”拦截逻辑 BEGIN =====
-    if (total_ip_addr_count > 0 && android::net::isForeignDomain(mHost, ip_addrs, uid, pid)) {
+    if (total_ip_addr_count > 0 && isForeign) {
         // 将本次解析视为失败，模拟 getaddrinfo 出错
         LOG(INFO) << "DnsProxyListener: blocking domain " << mHost
                   << " for uid=" << uid << " pid=" << pid;
@@ -1186,12 +1197,22 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
         rv = EAI_FAIL;  // 或 EAI_NONAME / EAI_NODATA，按你需要选择
 
         // 这里直接给 client 返回失败码
-        bool ok = !mClient->sendBinaryMsg(ResponseCode::DnsProxyOperationFailed,
-                                          &rv, sizeof(rv));
-        if (!ok) {
-            PLOG(WARNING) << "GetAddrInfoHandler::run(blocked): failed to send error to uid "
-                          << uid << " pid " << pid;
+        // bool ok = !mClient->sendBinaryMsg(ResponseCode::DnsProxyOperationFailed,
+        //                                   &rv, sizeof(rv));
+        // if (!ok) {
+        //     PLOG(WARNING) << "GetAddrInfoHandler::run(blocked): failed to send error to uid "
+        //                   << uid << " pid " << pid;
+        // }
+
+        rv = EAI_FAIL; // 或 EAI_NODATA / EAI_NONAME 更合适
+
+        // 直接按照 resolver 的“失败分支”语义返回 errno（用 sendBE32）
+        if (!sendBE32(mClient, rv)) {
+            PLOG(WARNING) << "GetAddrInfoHandler::run(blocked): failed to send errno to uid "
+                        << uid << " pid " << pid;
         }
+        // 直接返回，避免继续后续代码发送答案
+        return;
 
         // 上报一次事件，方便后续统计
         int32_t latencyBlockUs = saturate_cast<int32_t>(s.timeTakenUs());

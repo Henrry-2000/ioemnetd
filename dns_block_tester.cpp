@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>  // 添加这个头文件
+#include <unistd.h>  
 
 static void print_addrs(struct addrinfo* res) {
     char host[NI_MAXHOST] = {0};
